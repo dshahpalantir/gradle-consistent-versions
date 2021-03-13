@@ -41,6 +41,7 @@ import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Deque;
@@ -53,6 +54,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -254,6 +261,7 @@ public class VersionsLockPlugin implements Plugin<Project> {
         // configurations before we get a change to add constraints to them.
         //
         // [1]:https://github.com/JetBrains/intellij-community/commit/f394c51cff59c69bbaf63a8bf67cefbad9e357aa#diff-04b9936e4249a0f5727414555b76c4b9R123
+
         project.afterEvaluate(p -> {
             GradleWorkarounds.makeEvaluationDependOnSubprojectsToBeEvaluated(p);
 
@@ -886,8 +894,24 @@ public class VersionsLockPlugin implements Plugin<Project> {
         List<DependencyConstraint> publishableConstraints = constructPublishableConstraintsFromLockFile(
                 gradleLockfile, rootProject.getDependencies().getConstraints()::create);
 
-        rootProject.allprojects(subproject -> configureUsingConstraints(
-                subproject, locksDependency, publishableConstraints, lockedConfigurations.get(subproject)));
+        ExecutorService executorService = Executors.newFixedThreadPool(8);
+        Set<Project> allProjects = rootProject.getAllprojects();
+        List<Future<?>> allFutures = new ArrayList<>();
+        for (Project p : allProjects) {
+            Future<?> f = executorService.submit(() ->
+                    configureUsingConstraints(p, locksDependency, publishableConstraints, lockedConfigurations.get(p)));
+            allFutures.add(f);
+        }
+        for (Future<?> f : allFutures) {
+            try {
+                f.get(60, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new RuntimeException("Timeout waiting for project configurations to be computed", e);
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException("Exception while waiting for project configurations to be computed", e);
+            }
+        }
+        executorService.shutdownNow();
     }
 
     private static void configureUsingConstraints(
