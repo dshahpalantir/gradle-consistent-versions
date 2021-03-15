@@ -929,11 +929,27 @@ public class VersionsLockPlugin implements Plugin<Project> {
                 });
 
         Set<Configuration> configurationsToLock = lockedConfigurations.allConfigurations();
+
         log.info("Configuring locks for {}. Locked configurations: {}", subproject.getPath(), configurationsToLock);
-        configurationsToLock.forEach(conf -> {
-            conf.extendsFrom(locksConfiguration);
-            VersionsLockPlugin.ensureNoFailOnVersionConflict(conf);
-        });
+        List<Future<?>> allFutures = new ArrayList<>();
+        ExecutorService executorService = Executors.newFixedThreadPool(8);
+        for (Configuration conf : configurationsToLock) {
+            Future<?> future = executorService.submit(() -> {
+                conf.extendsFrom(locksConfiguration);
+                VersionsLockPlugin.ensureNoFailOnVersionConflict(conf);
+            });
+            allFutures.add(future);
+        }
+        for (Future<?> f : allFutures) {
+            try {
+                f.get(60, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new RuntimeException("Timeout waiting for project configurations to be computed", e);
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException("Exception while waiting for project configurations to be computed", e);
+            }
+        }
+        executorService.shutdownNow();
 
         NamedDomainObjectProvider<Configuration> publishConstraints = subproject
                 .getConfigurations()
